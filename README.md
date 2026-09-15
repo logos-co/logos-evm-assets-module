@@ -31,7 +31,9 @@ giving a matching native asset the first slot on page zero.
 
 `get_balances` batches the native and ERC-20 reads in one Multicall3 request. An unreadable
 leg is distinct from a zero balance. Every raw amount is a decimal string and is accompanied
-by exact and display-safe rendering when the read succeeded.
+by exact and display-safe rendering when the read succeeded. The proof-backed RPC hop is
+bounded at twelve seconds: long enough for a multi-token proof on a healthy verified proxy,
+while the whole asset read remains bounded at fourteen seconds.
 
 `build_transfer` accepts:
 
