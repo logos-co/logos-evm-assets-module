@@ -4,11 +4,13 @@
   inputs = {
     logos-module-builder.url = "github:logos-co/logos-module-builder";
     eth_rpc_module = {
-      url = "github:logos-co/logos-evm-eth-rpc-module";
+      # Temporary PR pin; return to the default branch after provider PR #14 merges.
+      url = "github:logos-co/logos-evm-eth-rpc-module?ref=feat/chain-registry";
       inputs.logos-module-builder.follows = "logos-module-builder";
     };
     token_list_module = {
-      url = "github:logos-co/logos-evm-token-list-module";
+      # Temporary PR pin; return to the default branch after provider PR #8 merges.
+      url = "github:logos-co/logos-evm-token-list-module?ref=feat/offered-set";
       inputs.logos-module-builder.follows = "logos-module-builder";
     };
   };
