@@ -12,4 +12,6 @@ jobs:
     secrets: inherit
     with:
       targets: default
-      cold-derivation-budget: 170
+      # Measured 250 non-heavy derivations on 2026-09-15; this is the Rust crate
+      # closure, not an accidentally cold Qt/LLVM closure.
+      cold-derivation-budget: 260
