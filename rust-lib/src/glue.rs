@@ -8,7 +8,8 @@ use alloy::primitives::{Address, U256};
 use serde_json::{json, Value};
 
 use crate::assets::{self, Asset, TokenSort};
-use crate::budget::{deadline, Budget, LOCAL, READ, RPC, TRANSFER};
+use crate::budget::{deadline, Budget, INIT, LOCAL, PROBE, READ, RPC, STARTUP, TRANSFER};
+use crate::depinit::{self, Next};
 use crate::transfer::{self, TransferRequest};
 use crate::verified::{self, Answer};
 use crate::{codec, rows, units};
@@ -43,6 +44,8 @@ include!(concat!(
 
 #[derive(Default)]
 struct EvmAssetsModuleImpl {
+    eth_rpc_settled: AtomicBool,
+    token_list_settled: AtomicBool,
     watching_tokens: AtomicBool,
     watching_chains: AtomicBool,
 }
@@ -74,32 +77,73 @@ fn asset_value(asset: &Asset) -> Value {
 }
 
 impl EvmAssetsModuleImpl {
-    fn ensure_defaults(&self) {
-        if let Ok(status) = modules().eth_rpc_module.config_status_with_timeout(LOCAL) {
-            if serde_json::from_str::<Value>(&status)
-                .ok()
-                .and_then(|v| v.get("state").and_then(Value::as_str).map(str::to_string))
-                .as_deref()
-                == Some("unconfigured")
-            {
-                let _ = modules().eth_rpc_module.init_defaults_with_timeout(LOCAL);
-            }
+    fn ensure_eth_rpc(&self, budget: &Budget) {
+        if self.eth_rpc_settled.load(Ordering::Relaxed) {
+            return;
         }
-        if let Ok(status) = modules()
+        let Some(timeout) = budget.take(PROBE) else {
+            return;
+        };
+        let Ok(status) = modules().eth_rpc_module.config_status_with_timeout(timeout) else {
+            return;
+        };
+        match depinit::next_step(&status) {
+            Next::Settled => self.eth_rpc_settled.store(true, Ordering::Relaxed),
+            Next::Initialize => {
+                let Some(timeout) = budget.take(INIT) else {
+                    return;
+                };
+                let initialized = modules()
+                    .eth_rpc_module
+                    .init_defaults_with_timeout(timeout)
+                    .map(|raw| depinit::reply_ok(&raw))
+                    .unwrap_or(false);
+                if initialized {
+                    self.eth_rpc_settled.store(true, Ordering::Relaxed);
+                }
+            }
+            Next::AskAgain => {}
+        }
+    }
+
+    fn ensure_token_list(&self, budget: &Budget) {
+        if self.token_list_settled.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(timeout) = budget.take(PROBE) else {
+            return;
+        };
+        let Ok(status) = modules()
             .token_list_module
-            .config_status_with_timeout(LOCAL)
-        {
-            if serde_json::from_str::<Value>(&status)
-                .ok()
-                .and_then(|v| v.get("state").and_then(Value::as_str).map(str::to_string))
-                .as_deref()
-                == Some("unconfigured")
-            {
-                let _ = modules()
+            .config_status_with_timeout(timeout)
+        else {
+            return;
+        };
+        match depinit::next_step(&status) {
+            Next::Settled => self.token_list_settled.store(true, Ordering::Relaxed),
+            Next::Initialize => {
+                let Some(timeout) = budget.take(INIT) else {
+                    return;
+                };
+                let initialized = modules()
                     .token_list_module
-                    .init_defaults_with_timeout(LOCAL);
+                    .init_defaults_with_timeout(timeout)
+                    .map(|raw| depinit::reply_ok(&raw))
+                    .unwrap_or(false);
+                if initialized {
+                    self.token_list_settled.store(true, Ordering::Relaxed);
+                }
             }
+            Next::AskAgain => {}
         }
+    }
+
+    /// Startup is best effort. Every public fact read calls this again until both providers
+    /// explicitly report configured, so an early capability-token rejection cannot strand a
+    /// fresh profile at chain 0 for the rest of the process lifetime.
+    fn ensure_defaults(&self, budget: &Budget) {
+        self.ensure_eth_rpc(budget);
+        self.ensure_token_list(budget);
     }
 
     fn watch(&self) {
@@ -224,7 +268,8 @@ impl EvmAssetsModuleImpl {
 
 impl EvmAssetsModule for EvmAssetsModuleImpl {
     fn on_context_ready(&self, _ctx: &RustModuleContext) {
-        self.ensure_defaults();
+        let budget = Budget::new(STARTUP);
+        self.ensure_defaults(&budget);
         self.watch();
     }
 
@@ -232,8 +277,9 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
         if chain_id < 0 {
             return err("chainId must be non-negative");
         }
-        self.watch();
         let budget = Budget::new(READ);
+        self.ensure_defaults(&budget);
+        self.watch();
         match self.offered(chain_id as u64, &budget) {
             Ok(assets) => json!({"ok":true,"chainId":chain_id,"tokens":assets.iter().map(asset_value).collect::<Vec<_>>()}).to_string(),
             Err(error) => err(error),
@@ -244,8 +290,9 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
         if chain_id < 0 {
             return err("chainId must be non-negative");
         }
-        self.watch();
         let budget = Budget::new(READ);
+        self.ensure_defaults(&budget);
+        self.watch();
         let record = match self.chain_record(chain_id as u64, &budget) {
             Ok(v) => v,
             Err(e) => return err(e),
@@ -320,6 +367,7 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
             Err(e) => return err(format!("invalid address: {e}")),
         };
         let budget = Budget::new(READ);
+        self.ensure_defaults(&budget);
         let offered = match self.offered(chain_id as u64, &budget) {
             Ok(v) => v,
             Err(e) => return err(e),
@@ -359,6 +407,7 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
             return err("chainId must be non-negative");
         }
         let budget = Budget::new(READ);
+        self.ensure_defaults(&budget);
         let offered = match self.offered(chain_id as u64, &budget) {
             Ok(v) => v,
             Err(e) => return err(e),
@@ -386,6 +435,7 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
             .map(|d| d.min(TRANSFER))
             .unwrap_or(TRANSFER);
         let budget = Budget::new(allowance);
+        self.ensure_defaults(&budget);
         let offered = match self.offered(chain_id as u64, &budget) {
             Ok(v) => v,
             Err(e) => return err(e),
@@ -443,6 +493,7 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
             .filter_map(|row| row.get("chainId").and_then(Value::as_u64))
             .collect();
         let budget = Budget::new(READ);
+        self.ensure_defaults(&budget);
         let mut cache = BTreeMap::new();
         let mut records = BTreeMap::new();
         let mut attempted = BTreeSet::new();

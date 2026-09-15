@@ -4,6 +4,7 @@
 pub mod assets;
 pub mod budget;
 pub mod codec;
+pub mod depinit;
 pub mod rows;
 pub mod transfer;
 pub mod units;

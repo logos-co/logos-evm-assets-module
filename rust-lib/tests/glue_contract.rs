@@ -135,3 +135,24 @@ fn only_the_declared_fact_providers_are_called() {
     clients.dedup();
     assert_eq!(clients, ["eth_rpc_module", "token_list_module"]);
 }
+
+#[test]
+fn every_fact_read_retries_unsettled_dependency_initialization() {
+    for (name, next) in [
+        ("list_offered", "list_available"),
+        ("list_available", "get_balances"),
+        ("get_balances", "resolve_asset"),
+        ("resolve_asset", "build_transfer"),
+        ("build_transfer", "decorate_history"),
+        ("decorate_history", "logos_module_install"),
+    ] {
+        let body = method(GLUE, name, next);
+        assert!(
+            body.contains("self.ensure_defaults(&budget)"),
+            "{name} does not retry dependency initialization"
+        );
+    }
+
+    let startup = method(GLUE, "on_context_ready", "list_offered");
+    assert!(startup.contains("self.ensure_defaults(&budget)"));
+}

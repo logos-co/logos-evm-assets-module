@@ -8,6 +8,11 @@ construction, and transaction-history decoration.
 It deliberately has no keystore or sender dependency. It cannot request approval, sign, or
 broadcast a transaction; callers receive one unsigned call and decide how to submit it.
 
+On a fresh profile it asks both fact providers to apply their own defaults. Only an explicit
+`unconfigured` status licenses that write. Startup is best effort, and every public fact read
+retries until both providers explicitly report a settled configuration, so an early IPC or
+capability-token race cannot leave the process permanently unconfigured.
+
 ## Contract
 
 ```text

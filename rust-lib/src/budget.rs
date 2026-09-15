@@ -1,6 +1,9 @@
 use std::time::{Duration, Instant};
 
 pub const LOCAL: Duration = Duration::from_secs(3);
+pub const PROBE: Duration = Duration::from_millis(1_500);
+pub const INIT: Duration = Duration::from_secs(3);
+pub const STARTUP: Duration = Duration::from_secs(6);
 pub const RPC: Duration = Duration::from_secs(3);
 pub const READ: Duration = Duration::from_secs(7);
 pub const TRANSFER: Duration = Duration::from_millis(4_500);
@@ -42,5 +45,12 @@ mod tests {
     #[test]
     fn a_budget_never_grants_more_than_its_total() {
         assert!(Budget::new(READ).take(Duration::from_secs(99)).unwrap() <= READ);
+    }
+
+    #[test]
+    fn startup_is_bounded_across_both_dependencies() {
+        let budget = Budget::new(STARTUP);
+        assert_eq!(budget.take(PROBE), Some(PROBE));
+        assert!(budget.take(INIT).unwrap() <= INIT);
     }
 }
