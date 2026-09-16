@@ -1,0 +1,45 @@
+name: evm_assets_module Unit Tests
+
+on:
+  pull_request:
+    branches: [master, main]
+  push:
+    branches: [master, main]
+
+concurrency:
+  group: unit-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-test:
+    name: cargo test (pure asset core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.89"
+      - name: Provide the optional SDK manifest
+        uses: actions/checkout@v4
+        with:
+          repository: logos-co/logos-rust-sdk
+          path: logos-rust-sdk-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-lib
+      - run: cargo test --manifest-path rust-lib/Cargo.toml --no-default-features --locked
+      - name: The safety suite must remain present
+        run: |
+          out=$(cargo test --manifest-path rust-lib/Cargo.toml --no-default-features --locked -- --list)
+          echo "$out"
+          for t in money_never_leaves_from_the_assets_module \
+                   outbound_requests_are_explicitly_bounded \
+                   every_fact_read_retries_unsettled_dependency_initialization \
+                   a_transfer_builds_one_call_and_checks_at_most_one_contract \
+                   structured_refusals_survive \
+                   each_history_row_uses_its_own_chain \
+                   refuses_ambiguous_or_lossy_amounts; do
+            echo "$out" | grep -q "$t" || { echo "MISSING: $t"; exit 1; }
+          done
+          n=$(echo "$out" | grep -c ': test$')
+          echo "tests: $n"; [ "$n" -ge 35 ]

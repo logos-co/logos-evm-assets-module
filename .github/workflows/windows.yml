@@ -1,0 +1,17 @@
+name: Windows
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  windows:
+    uses: logos-co/logos-windows-ci/.github/workflows/windows-ci.yml@v1
+    secrets: inherit
+    with:
+      targets: default
+      # Measured 250 non-heavy derivations on 2026-09-15; this is the Rust crate
+      # closure, not an accidentally cold Qt/LLVM closure.
+      cold-derivation-budget: 260
