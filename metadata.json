@@ -9,7 +9,10 @@
   "description": "Reusable native and ERC-20 offers, balances, transfer building, and transaction-history decoration.",
   "author": "Logos Core Team",
   "main": "evm_assets_module_plugin",
-  "dependencies": ["eth_rpc_module", "token_list_module"],
+  "dependencies": [
+    { "name": "eth_rpc_module", "version": "~0.1.0" },
+    { "name": "token_list_module", "version": "~0.1.0" }
+  ],
   "include": [],
   "capabilities": [],
   "codegen": {
