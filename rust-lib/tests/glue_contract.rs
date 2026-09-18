@@ -80,8 +80,6 @@ fn outbound_requests_are_explicitly_bounded() {
         ".config_status(",
         ".init_defaults(",
         ".list_chain_configs(",
-        ".list_offered(",
-        ".list_available(",
         ".call(",
     ] {
         assert!(
@@ -89,7 +87,7 @@ fn outbound_requests_are_explicitly_bounded() {
             "unbounded outbound call: {unbounded}"
         );
     }
-    assert!(code.matches("_with_timeout(").count() >= 8);
+    assert!(code.matches("_with_timeout(").count() >= 4);
 }
 
 #[test]
@@ -133,14 +131,20 @@ fn only_the_declared_fact_providers_are_called() {
     }
     clients.sort();
     clients.dedup();
-    assert_eq!(clients, ["eth_rpc_module", "token_list_module"]);
+    assert_eq!(clients, ["eth_rpc_module"]);
+}
+
+#[test]
+fn the_caller_owns_token_membership() {
+    for gone in ["token_list", "EvmAssetsModuleEvents"] {
+        assert!(!GLUE.contains(gone), "assets glue still contains {gone}");
+    }
 }
 
 #[test]
 fn every_fact_read_retries_unsettled_dependency_initialization() {
     for (name, next) in [
-        ("list_offered", "list_available"),
-        ("list_available", "get_balances"),
+        ("list_assets", "get_balances"),
         ("get_balances", "resolve_asset"),
         ("resolve_asset", "build_transfer"),
         ("build_transfer", "decorate_history"),
@@ -148,11 +152,11 @@ fn every_fact_read_retries_unsettled_dependency_initialization() {
     ] {
         let body = method(GLUE, name, next);
         assert!(
-            body.contains("self.ensure_defaults(&budget)"),
+            body.contains("self.ensure_eth_rpc(&budget)"),
             "{name} does not retry dependency initialization"
         );
     }
 
-    let startup = method(GLUE, "on_context_ready", "list_offered");
-    assert!(startup.contains("self.ensure_defaults(&budget)"));
+    let startup = method(GLUE, "on_context_ready", "list_assets");
+    assert!(startup.contains("self.ensure_eth_rpc(&budget)"));
 }

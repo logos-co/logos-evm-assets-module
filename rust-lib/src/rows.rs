@@ -1,4 +1,4 @@
-//! Decorate sender history with the offered set for each row's own chain.
+//! Decorate sender history with the assets the caller gave for each row's own chain.
 
 use alloy::primitives::Address;
 use serde_json::{json, Value};
@@ -177,6 +177,21 @@ mod tests {
             Vec::new()
         });
         assert_eq!(seen, [1, 10]);
+    }
+
+    #[test]
+    fn tokens_decorate_only_the_chain_they_are_given_for() {
+        let given = json!({"1":[{"address":weth().address,"symbol":"WETH","decimals":18}]});
+        let tokens = crate::assets::parse_tokens_by_chain(&given.to_string()).unwrap();
+        let transfers =
+            json!([{"contract":"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2","amount":"1"}]);
+        let mut history = json!({"transactions":[{"chainId":1,"transfers":transfers},
+                                                 {"chainId":10,"transfers":transfers}]});
+        decorate_history(&mut history, |chain| {
+            tokens.get(&chain).cloned().unwrap_or_default()
+        });
+        assert_eq!(history["transactions"][0]["transfers"][0]["symbol"], "WETH");
+        assert_eq!(history["transactions"][1]["transfers"][0]["known"], false);
     }
 
     #[test]

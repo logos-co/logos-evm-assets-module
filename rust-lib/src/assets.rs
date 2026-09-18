@@ -1,6 +1,7 @@
-//! Asset rows shared by offers, balances, transfer resolution and history decoration.
+//! Asset rows shared by listings, balances, transfer resolution and history decoration.
 
 use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet};
 
 use alloy::primitives::{Address, U256};
 use serde::{Deserialize, Serialize};
@@ -66,14 +67,36 @@ impl Asset {
         })
     }
 
-    pub fn from_token_row(chain_id: u64, row: &Value) -> Option<Self> {
-        let address = row.get("address")?.as_str()?.trim();
-        address.parse::<Address>().ok()?;
-        let symbol = row.get("symbol")?.as_str()?.trim();
-        if symbol.is_empty() {
-            return None;
+    /// One caller-given ERC-20 descriptor; the error says why it is unusable.
+    pub fn from_token_row(chain_id: u64, row: &Value) -> Result<Self, String> {
+        if row.get("native").and_then(Value::as_bool) == Some(true) {
+            return Err("the native asset is implicit, never a descriptor".into());
         }
-        Some(Self {
+        let address = row
+            .get("address")
+            .and_then(Value::as_str)
+            .ok_or("no address")?
+            .trim();
+        let parsed = address
+            .parse::<Address>()
+            .map_err(|e| format!("invalid address: {e}"))?;
+        if parsed.is_zero() {
+            return Err("the zero address is not a token".into());
+        }
+        let symbol = row
+            .get("symbol")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if symbol.is_empty() {
+            return Err("no symbol".into());
+        }
+        let decimals = row
+            .get("decimals")
+            .and_then(Value::as_u64)
+            .and_then(|n| u8::try_from(n).ok())
+            .ok_or("decimals must be a whole number from 0 to 255")?;
+        Ok(Self {
             chain_id,
             symbol: symbol.into(),
             name: row
@@ -81,10 +104,7 @@ impl Asset {
                 .and_then(Value::as_str)
                 .unwrap_or(symbol)
                 .into(),
-            decimals: row
-                .get("decimals")
-                .and_then(Value::as_u64)
-                .and_then(|n| u8::try_from(n).ok())?,
+            decimals,
             address: Some(address.into()),
             native: false,
             builtin: row.get("builtin").and_then(Value::as_bool).unwrap_or(false),
@@ -101,6 +121,56 @@ impl Asset {
             symbol_unknown: false,
         })
     }
+}
+
+fn descriptors(chain_id: u64, rows: &[Value], path: &str) -> Result<Vec<Asset>, String> {
+    let mut seen = BTreeSet::new();
+    let mut assets = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let asset = Asset::from_token_row(chain_id, row).map_err(|why| {
+            json!({"ok":false,"code":"bad_token","error":format!("{path}[{index}]: {why}")})
+                .to_string()
+        })?;
+        let address = asset.address.as_deref().unwrap_or_default();
+        if seen.insert(address.to_ascii_lowercase()) {
+            assets.push(asset);
+        }
+    }
+    Ok(assets)
+}
+
+/// Caller-given ERC-20 descriptors. A repeated address keeps its first occurrence.
+pub fn tokens(chain_id: u64, rows: &[Value]) -> Result<Vec<Asset>, String> {
+    descriptors(chain_id, rows, "tokens")
+}
+
+/// A `tokens_json` array of descriptors; `""` means `[]`.
+pub fn parse_tokens(chain_id: u64, tokens_json: &str) -> Result<Vec<Asset>, String> {
+    if tokens_json.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<Value> =
+        serde_json::from_str(tokens_json).map_err(|e| format!("invalid tokens: {e}"))?;
+    tokens(chain_id, &rows)
+}
+
+/// History decoration's `{ "<chainId>": [descriptors] }`; `""` means `{}`.
+pub fn parse_tokens_by_chain(tokens_json: &str) -> Result<BTreeMap<u64, Vec<Asset>>, String> {
+    if tokens_json.trim().is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let chains: BTreeMap<String, Vec<Value>> =
+        serde_json::from_str(tokens_json).map_err(|e| format!("invalid tokens: {e}"))?;
+    chains
+        .into_iter()
+        .map(|(key, rows)| {
+            let chain_id = key
+                .parse::<u64>()
+                .map_err(|_| format!("tokens key '{key}' is not a chainId"))?;
+            let path = format!("tokens[\"{key}\"]");
+            Ok((chain_id, descriptors(chain_id, &rows, &path)?))
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -299,5 +369,78 @@ mod tests {
         assert_eq!(TokenSort::parse("alpha"), Some(TokenSort::Alpha));
         assert_eq!(TokenSort::parse("balance"), Some(TokenSort::Balance));
         assert_eq!(TokenSort::parse("value"), None);
+    }
+
+    const A: &str = "0x00000000000000000000000000000000000000aa";
+
+    fn descriptor(symbol: &str, address: &str) -> Value {
+        json!({"address":address,"symbol":symbol,"decimals":6})
+    }
+    fn refused(error: String) -> Value {
+        serde_json::from_str(&error).unwrap()
+    }
+
+    #[test]
+    fn every_bad_descriptor_is_refused_as_bad_token() {
+        for (field, value, why) in [
+            ("address", Value::Null, "no address"),
+            ("address", json!("0x12"), "invalid address"),
+            ("address", json!(Address::ZERO.to_string()), "zero address"),
+            ("symbol", json!(" "), "no symbol"),
+            ("decimals", Value::Null, "decimals"),
+            ("decimals", json!(256), "decimals"),
+            ("native", json!(true), "native asset is implicit"),
+        ] {
+            let mut bad = descriptor("B", "0x00000000000000000000000000000000000000bb");
+            bad[field] = value;
+            let refusal = refused(tokens(1, &[descriptor("A", A), bad]).unwrap_err());
+            assert_eq!(refusal["ok"], false);
+            assert_eq!(refusal["code"], "bad_token");
+            let error = refusal["error"].as_str().unwrap();
+            assert!(error.starts_with("tokens[1]: "), "{error}");
+            assert!(error.contains(why), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_repeated_address_keeps_its_first_occurrence() {
+        let upper = "0x00000000000000000000000000000000000000AA";
+        let kept = tokens(1, &[descriptor("FIRST", A), descriptor("LATER", upper)]).unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].symbol, "FIRST");
+    }
+
+    #[test]
+    fn a_descriptor_becomes_an_asset_row() {
+        let given =
+            json!([{"address":format!(" {A} "),"symbol":" USDC ","decimals":6,"logoURI":"u"}]);
+        let rows = parse_tokens(10, &given.to_string()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&rows[0]).unwrap(),
+            json!({"chainId":10,"symbol":"USDC","name":"USDC","decimals":6,"address":A,"native":false,
+                   "builtin":false,"enabled":false,"source":"unknown","logoURI":"u"})
+        );
+    }
+
+    #[test]
+    fn empty_tokens_json_means_no_tokens() {
+        assert!(parse_tokens(1, "").unwrap().is_empty());
+        assert!(parse_tokens(1, "[]").unwrap().is_empty());
+        assert!(parse_tokens(1, "{}").is_err());
+        assert!(parse_tokens_by_chain("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn tokens_by_chain_belong_to_their_key() {
+        let given = json!({"10":[descriptor("A", A)],"1":[]});
+        let chains = parse_tokens_by_chain(&given.to_string()).unwrap();
+        assert_eq!(chains[&10][0].chain_id, 10);
+        assert!(chains[&1].is_empty());
+        let error = parse_tokens_by_chain(r#"{"10":[{"symbol":"A"}]}"#).unwrap_err();
+        let refusal = refused(error);
+        assert_eq!(refusal["code"], "bad_token");
+        let error = refusal["error"].as_str().unwrap();
+        assert!(error.starts_with(r#"tokens["10"][0]: "#), "{error}");
+        assert!(parse_tokens_by_chain(r#"{"mainnet":[]}"#).is_err());
     }
 }
