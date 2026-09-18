@@ -16729,8 +16729,7 @@
     "root": {
       "inputs": {
         "eth_rpc_module": "eth_rpc_module",
-        "logos-module-builder": "logos-module-builder",
-        "token_list_module": "token_list_module"
+        "logos-module-builder": "logos-module-builder"
       }
     },
     "rust-overlay": {
@@ -16830,26 +16829,6 @@
       "original": {
         "owner": "oxalica",
         "repo": "rust-overlay",
-        "type": "github"
-      }
-    },
-    "token_list_module": {
-      "inputs": {
-        "logos-module-builder": [
-          "logos-module-builder"
-        ]
-      },
-      "locked": {
-        "lastModified": 1789514647,
-        "narHash": "sha256-94FPAFWqAAdg9Vj3eEDa0RCm+69nny3VkblxQifaWiI=",
-        "owner": "logos-co",
-        "repo": "logos-evm-token-list-module",
-        "rev": "e108e61c5e0a5ee0d88fc6ad318f55c885538070",
-        "type": "github"
-      },
-      "original": {
-        "owner": "logos-co",
-        "repo": "logos-evm-token-list-module",
         "type": "github"
       }
     },

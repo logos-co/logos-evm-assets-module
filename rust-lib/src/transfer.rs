@@ -21,6 +21,8 @@ pub struct TransferRequest {
     #[serde(default)]
     pub token_address: Option<String>,
     #[serde(default)]
+    pub tokens: Vec<Value>,
+    #[serde(default)]
     pub deadline_ms: Option<i64>,
 }
 
@@ -186,5 +188,55 @@ mod tests {
         let mut request = req();
         request.deadline_ms = Some(4500);
         assert_eq!(resolve(1, &request, &[native()]).unwrap().chain_id, 1);
+    }
+
+    fn token_req(token: &str, tokens: Value) -> TransferRequest {
+        serde_json::from_value(json!({"from":"0x0000000000000000000000000000000000000001",
+            "to":"0x0000000000000000000000000000000000000002","amountUnits":"2",
+            "token":token,"tokens":tokens}))
+        .unwrap()
+    }
+    fn candidates(request: &TransferRequest) -> Vec<Asset> {
+        let mut offered = vec![native()];
+        offered.extend(assets::tokens(1, &request.tokens).unwrap());
+        offered
+    }
+
+    #[test]
+    fn a_token_resolves_only_among_the_requests_candidates() {
+        let usdc = "0x00000000000000000000000000000000000000aa";
+        let request = token_req(
+            "usdc",
+            json!([{"address":usdc,"symbol":"USDC","decimals":6}]),
+        );
+        let resolved = resolve(1, &request, &candidates(&request)).unwrap();
+        assert_eq!(resolved.amount, U256::from(2_000_000));
+        let call = call(&resolved);
+        assert!(call["to"].as_str().unwrap().eq_ignore_ascii_case(usdc));
+        assert_eq!(call["meta"]["kind"], "erc20");
+
+        let bare = token_req("USDC", json!([]));
+        assert!(resolve(1, &bare, &candidates(&bare)).is_err());
+    }
+
+    #[test]
+    fn an_ambiguous_symbol_among_the_candidates_is_refused() {
+        let tokens = json!([
+            {"address":"0x00000000000000000000000000000000000000aa","symbol":"LIT","decimals":18},
+            {"address":"0x00000000000000000000000000000000000000bb","symbol":"LIT","decimals":6}
+        ]);
+        let request = token_req("LIT", tokens.clone());
+        let error = resolve(1, &request, &candidates(&request)).unwrap_err();
+        assert!(error.contains("use an address"), "{error}");
+
+        let mut exact = token_req("LIT", tokens);
+        exact.token_address = Some("0x00000000000000000000000000000000000000BB".into());
+        assert_eq!(
+            resolve(1, &exact, &candidates(&exact))
+                .unwrap()
+                .asset
+                .decimals,
+            6
+        );
     }
 }

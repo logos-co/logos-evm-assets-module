@@ -15,26 +15,26 @@ use crate::verified::{self, Answer};
 use crate::{codec, rows, units};
 
 pub trait EvmAssetsModule: Send + Sync + 'static {
-    /// Native currency followed by pinned and enabled ERC-20 rows.
-    fn list_offered(&self, chain_id: i64) -> String;
-    /// Native-aware, offered-first search and pagination.
-    fn list_available(&self, chain_id: i64, query: String, offset: i64, limit: i64) -> String;
-    /// One Multicall3 read for native and every offered token balance.
-    fn get_balances(&self, chain_id: i64, address: String, token_sort: String) -> String;
-    /// Build exactly one unsigned native or ERC-20 call. Never signs or broadcasts.
+    /// Native currency followed by the given ERC-20 descriptors, as asset rows.
+    fn list_assets(&self, chain_id: i64, tokens_json: String) -> String;
+    /// One Multicall3 read for native and every given token balance.
+    fn get_balances(
+        &self,
+        chain_id: i64,
+        address: String,
+        tokens_json: String,
+        token_sort: String,
+    ) -> String;
+    /// Build exactly one unsigned native or ERC-20 call, resolved among native and the
+    /// request's `tokens`. Never signs or broadcasts.
     fn build_transfer(&self, chain_id: i64, request_json: String) -> String;
-    /// Resolve one offered asset by exact address or unambiguous symbol.
-    fn resolve_asset(&self, chain_id: i64, key: String) -> String;
-    /// Decorate sender history, selecting the offered set by every row's chainId. A
-    /// catalogue failure on one chain leaves that chain's rows intact and is reported in
+    /// Resolve native or one given token by exact address or unambiguous symbol.
+    fn resolve_asset(&self, chain_id: i64, key: String, tokens_json: String) -> String;
+    /// Decorate sender history with `{ "<chainId>": [descriptors] }`, native only for a chain
+    /// the map omits. A chain-registry failure leaves that chain's rows intact, reported in
     /// `decorationErrors`; it never erases usable activity from the other chains.
-    fn decorate_history(&self, history_json: String) -> String;
+    fn decorate_history(&self, history_json: String, tokens_json: String) -> String;
     fn on_context_ready(&self, _ctx: &RustModuleContext) {}
-}
-
-pub trait EvmAssetsModuleEvents {
-    /// Native metadata or the ERC-20 offered set changed for one chain.
-    fn offered_changed(&self, chain_id: i64);
 }
 
 include!(concat!(
@@ -45,9 +45,6 @@ include!(concat!(
 #[derive(Default)]
 struct EvmAssetsModuleImpl {
     eth_rpc_settled: AtomicBool,
-    token_list_settled: AtomicBool,
-    watching_tokens: AtomicBool,
-    watching_chains: AtomicBool,
 }
 
 fn err(error: impl std::fmt::Display) -> String {
@@ -77,6 +74,9 @@ fn asset_value(asset: &Asset) -> Value {
 }
 
 impl EvmAssetsModuleImpl {
+    /// Startup is best effort. Every public fact read calls this again until eth_rpc explicitly
+    /// reports configured, so an early capability-token rejection cannot strand a fresh
+    /// profile at chain 0 for the rest of the process lifetime.
     fn ensure_eth_rpc(&self, budget: &Budget) {
         if self.eth_rpc_settled.load(Ordering::Relaxed) {
             return;
@@ -106,85 +106,6 @@ impl EvmAssetsModuleImpl {
         }
     }
 
-    fn ensure_token_list(&self, budget: &Budget) {
-        if self.token_list_settled.load(Ordering::Relaxed) {
-            return;
-        }
-        let Some(timeout) = budget.take(PROBE) else {
-            return;
-        };
-        let Ok(status) = modules()
-            .token_list_module
-            .config_status_with_timeout(timeout)
-        else {
-            return;
-        };
-        match depinit::next_step(&status) {
-            Next::Settled => self.token_list_settled.store(true, Ordering::Relaxed),
-            Next::Initialize => {
-                let Some(timeout) = budget.take(INIT) else {
-                    return;
-                };
-                let initialized = modules()
-                    .token_list_module
-                    .init_defaults_with_timeout(timeout)
-                    .map(|raw| depinit::reply_ok(&raw))
-                    .unwrap_or(false);
-                if initialized {
-                    self.token_list_settled.store(true, Ordering::Relaxed);
-                }
-            }
-            Next::AskAgain => {}
-        }
-    }
-
-    /// Startup is best effort. Every public fact read calls this again until both providers
-    /// explicitly report configured, so an early capability-token rejection cannot strand a
-    /// fresh profile at chain 0 for the rest of the process lifetime.
-    fn ensure_defaults(&self, budget: &Budget) {
-        self.ensure_eth_rpc(budget);
-        self.ensure_token_list(budget);
-    }
-
-    fn watch(&self) {
-        if !self.watching_tokens.swap(true, Ordering::SeqCst) {
-            let mut client = modules().token_list_module;
-            match client.on_tokens_updated() {
-                Ok(stream) => std::thread::spawn(move || {
-                    for event in stream {
-                        if let Some(event) =
-                            token_list_module::TokenListModuleClient::decode_tokens_updated(&event)
-                        {
-                            emit_offered_changed(event.chain_id);
-                        }
-                    }
-                }),
-                Err(_) => {
-                    self.watching_tokens.store(false, Ordering::SeqCst);
-                    return;
-                }
-            };
-        }
-        if !self.watching_chains.swap(true, Ordering::SeqCst) {
-            let mut client = modules().eth_rpc_module;
-            match client.on_chain_config_changed() {
-                Ok(stream) => std::thread::spawn(move || {
-                    for event in stream {
-                        if let Some(event) =
-                            eth_rpc_module::EthRpcModuleClient::decode_chain_config_changed(&event)
-                        {
-                            emit_offered_changed(event.chain_id);
-                        }
-                    }
-                }),
-                Err(_) => {
-                    self.watching_chains.store(false, Ordering::SeqCst);
-                    return;
-                }
-            };
-        }
-    }
-
     fn chain_record(&self, chain_id: u64, budget: &Budget) -> Result<Value, String> {
         let timeout = budget
             .take(LOCAL)
@@ -204,30 +125,16 @@ impl EvmAssetsModuleImpl {
             .ok_or_else(|| format!("chain {chain_id} is not configured"))
     }
 
-    fn token_rows(&self, chain_id: u64, budget: &Budget) -> Result<Vec<Value>, String> {
-        let timeout = budget
-            .take(LOCAL)
-            .ok_or("no time left to read offered tokens")?;
-        let raw = modules()
-            .token_list_module
-            .list_offered_with_timeout(chain_id as i64, timeout)
-            .map_err(|e| format!("token_list_module: {e:?}"))?;
-        let value = ok_value(raw)?;
-        Ok(value
-            .get("tokens")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default())
-    }
-
-    fn offered(&self, chain_id: u64, budget: &Budget) -> Result<Vec<Asset>, String> {
+    /// The chain's native asset, then the caller's tokens.
+    fn offered(
+        &self,
+        chain_id: u64,
+        tokens: Vec<Asset>,
+        budget: &Budget,
+    ) -> Result<Vec<Asset>, String> {
         let record = self.chain_record(chain_id, budget)?;
         let mut assets = vec![Asset::from_chain(&record)?];
-        assets.extend(
-            self.token_rows(chain_id, budget)?
-                .iter()
-                .filter_map(|row| Asset::from_token_row(chain_id, row)),
-        );
+        assets.extend(tokens);
         Ok(assets)
     }
 
@@ -269,93 +176,32 @@ impl EvmAssetsModuleImpl {
 impl EvmAssetsModule for EvmAssetsModuleImpl {
     fn on_context_ready(&self, _ctx: &RustModuleContext) {
         let budget = Budget::new(STARTUP);
-        self.ensure_defaults(&budget);
-        self.watch();
+        self.ensure_eth_rpc(&budget);
     }
 
-    fn list_offered(&self, chain_id: i64) -> String {
+    fn list_assets(&self, chain_id: i64, tokens_json: String) -> String {
         if chain_id < 0 {
             return err("chainId must be non-negative");
         }
+        let tokens = match assets::parse_tokens(chain_id as u64, &tokens_json) {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
         let budget = Budget::new(READ);
-        self.ensure_defaults(&budget);
-        self.watch();
-        match self.offered(chain_id as u64, &budget) {
+        self.ensure_eth_rpc(&budget);
+        match self.offered(chain_id as u64, tokens, &budget) {
             Ok(assets) => json!({"ok":true,"chainId":chain_id,"tokens":assets.iter().map(asset_value).collect::<Vec<_>>()}).to_string(),
             Err(error) => err(error),
         }
     }
 
-    fn list_available(&self, chain_id: i64, query: String, offset: i64, limit: i64) -> String {
-        if chain_id < 0 {
-            return err("chainId must be non-negative");
-        }
-        let budget = Budget::new(READ);
-        self.ensure_defaults(&budget);
-        self.watch();
-        let record = match self.chain_record(chain_id as u64, &budget) {
-            Ok(v) => v,
-            Err(e) => return err(e),
-        };
-        let native = match Asset::from_chain(&record) {
-            Ok(v) => v,
-            Err(e) => return err(e),
-        };
-        let needle = query.trim().to_ascii_lowercase();
-        let native_matches = needle.is_empty()
-            || native.symbol.to_ascii_lowercase().contains(&needle)
-            || native.name.to_ascii_lowercase().contains(&needle);
-        let offset = usize::try_from(offset).unwrap_or(0);
-        let provider_offset = if native_matches {
-            offset.saturating_sub(1)
-        } else {
-            offset
-        };
-        let timeout = match budget.take(LOCAL) {
-            Some(t) => t,
-            None => return err("no time left to read the token picker"),
-        };
-        let raw = match modules().token_list_module.list_available_with_timeout(
-            chain_id,
-            &query,
-            provider_offset as i64,
-            limit,
-            timeout,
-        ) {
-            Ok(v) => v,
-            Err(e) => return err(format!("token_list_module: {e:?}")),
-        };
-        let mut value = match ok_value(raw) {
-            Ok(v) => v,
-            Err(e) => return err(e),
-        };
-        let provider_total = value.get("total").and_then(Value::as_u64).unwrap_or(0) as usize;
-        let mut page = value
-            .get_mut("tokens")
-            .and_then(Value::as_array_mut)
-            .map(std::mem::take)
-            .unwrap_or_default();
-        for row in &mut page {
-            row["native"] = json!(false);
-        }
-        if native_matches && offset == 0 && limit != 0 {
-            page.insert(0, asset_value(&native));
-        }
-        if let Ok(cut) = usize::try_from(limit) {
-            if cut > 0 {
-                page.truncate(cut);
-            }
-        }
-        let total = provider_total + usize::from(native_matches);
-        value["total"] = json!(total);
-        value["offset"] = json!(offset);
-        value["shown"] = json!(page.len());
-        value["hasMore"] = json!(offset.saturating_add(page.len()) < total);
-        value["tokens"] = json!(page);
-        value.to_string()
-    }
-
-    fn get_balances(&self, chain_id: i64, address: String, token_sort: String) -> String {
+    fn get_balances(
+        &self,
+        chain_id: i64,
+        address: String,
+        tokens_json: String,
+        token_sort: String,
+    ) -> String {
         if chain_id < 0 {
             return err("chainId must be non-negative");
         }
@@ -366,9 +212,13 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
             Ok(v) => v,
             Err(e) => return err(format!("invalid address: {e}")),
         };
+        let tokens = match assets::parse_tokens(chain_id as u64, &tokens_json) {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
         let budget = Budget::new(READ);
-        self.ensure_defaults(&budget);
-        let offered = match self.offered(chain_id as u64, &budget) {
+        self.ensure_eth_rpc(&budget);
+        let offered = match self.offered(chain_id as u64, tokens, &budget) {
             Ok(v) => v,
             Err(e) => return err(e),
         };
@@ -402,13 +252,17 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
         .to_string()
     }
 
-    fn resolve_asset(&self, chain_id: i64, key: String) -> String {
+    fn resolve_asset(&self, chain_id: i64, key: String, tokens_json: String) -> String {
         if chain_id < 0 {
             return err("chainId must be non-negative");
         }
+        let tokens = match assets::parse_tokens(chain_id as u64, &tokens_json) {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
         let budget = Budget::new(READ);
-        self.ensure_defaults(&budget);
-        let offered = match self.offered(chain_id as u64, &budget) {
+        self.ensure_eth_rpc(&budget);
+        let offered = match self.offered(chain_id as u64, tokens, &budget) {
             Ok(v) => v,
             Err(e) => return err(e),
         };
@@ -428,6 +282,10 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
             Ok(v) => v,
             Err(e) => return err(format!("invalid transfer request: {e}")),
         };
+        let tokens = match assets::tokens(chain_id as u64, &request.tokens) {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
         let allowance = request
             .deadline_ms
             .and_then(|ms| u64::try_from(ms).ok())
@@ -435,8 +293,8 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
             .map(|d| d.min(TRANSFER))
             .unwrap_or(TRANSFER);
         let budget = Budget::new(allowance);
-        self.ensure_defaults(&budget);
-        let offered = match self.offered(chain_id as u64, &budget) {
+        self.ensure_eth_rpc(&budget);
+        let offered = match self.offered(chain_id as u64, tokens, &budget) {
             Ok(v) => v,
             Err(e) => return err(e),
         };
@@ -477,7 +335,7 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
                "purpose":transfer::purpose(&resolved),"route":verified::fold_route([route.as_deref()])}).to_string()
     }
 
-    fn decorate_history(&self, history_json: String) -> String {
+    fn decorate_history(&self, history_json: String, tokens_json: String) -> String {
         let mut value: Value = match serde_json::from_str(&history_json) {
             Ok(v) => v,
             Err(e) => return err(format!("invalid history: {e}")),
@@ -485,6 +343,10 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
         if !value.is_object() {
             return err("history must be a JSON object");
         }
+        let mut tokens = match assets::parse_tokens_by_chain(&tokens_json) {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
         let chains: Vec<u64> = value
             .get("transactions")
             .and_then(Value::as_array)
@@ -493,7 +355,7 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
             .filter_map(|row| row.get("chainId").and_then(Value::as_u64))
             .collect();
         let budget = Budget::new(READ);
-        self.ensure_defaults(&budget);
+        self.ensure_eth_rpc(&budget);
         let mut cache = BTreeMap::new();
         let mut records = BTreeMap::new();
         let mut attempted = BTreeSet::new();
@@ -516,14 +378,7 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
                     continue;
                 }
             };
-            match self.token_rows(chain, &budget) {
-                Ok(token_rows) => offered.extend(
-                    token_rows
-                        .iter()
-                        .filter_map(|row| Asset::from_token_row(chain, row)),
-                ),
-                Err(error) => decoration_errors.push(json!({"chainId":chain,"error":error})),
-            }
+            offered.extend(tokens.remove(&chain).unwrap_or_default());
             cache.insert(chain, offered);
             records.insert(chain, record);
         }

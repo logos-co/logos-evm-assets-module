@@ -60,7 +60,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_is_bounded_across_both_dependencies() {
+    fn startup_is_bounded_across_the_probe_and_init() {
         let budget = Budget::new(STARTUP);
         assert_eq!(budget.take(PROBE), Some(PROBE));
         assert!(budget.take(INIT).unwrap() <= INIT);

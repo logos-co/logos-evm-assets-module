@@ -1,4 +1,4 @@
-//! Ask-then-initialize state for the two fact providers this module composes.
+//! Ask-then-initialize state for eth_rpc_module, the fact provider this module composes.
 //!
 //! A failed call is not evidence that a dependency has no configuration. Only an explicit
 //! `unconfigured` answer licenses `init_defaults`; unreadable and early-startup replies must

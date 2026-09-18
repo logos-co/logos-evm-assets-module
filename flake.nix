@@ -7,10 +7,6 @@
       url = "github:logos-co/logos-evm-eth-rpc-module";
       inputs.logos-module-builder.follows = "logos-module-builder";
     };
-    token_list_module = {
-      url = "github:logos-co/logos-evm-token-list-module";
-      inputs.logos-module-builder.follows = "logos-module-builder";
-    };
   };
 
   outputs = inputs@{ self, logos-module-builder, ... }:
