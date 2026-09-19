@@ -1,9 +1,6 @@
 use std::time::{Duration, Instant};
 
 pub const LOCAL: Duration = Duration::from_secs(3);
-pub const PROBE: Duration = Duration::from_millis(1_500);
-pub const INIT: Duration = Duration::from_secs(3);
-pub const STARTUP: Duration = Duration::from_secs(6);
 // A verified eth_call includes the execution result and the proof work needed to check it.
 // The old three-second cap routinely expired on a Multicall3 containing a few ERC-20
 // balanceOf legs even though the verified proxy was healthy and still advancing. Keep the
@@ -57,12 +54,5 @@ mod tests {
     #[test]
     fn a_budget_never_grants_more_than_its_total() {
         assert!(Budget::new(READ).take(Duration::from_secs(99)).unwrap() <= READ);
-    }
-
-    #[test]
-    fn startup_is_bounded_across_the_probe_and_init() {
-        let budget = Budget::new(STARTUP);
-        assert_eq!(budget.take(PROBE), Some(PROBE));
-        assert!(budget.take(INIT).unwrap() <= INIT);
     }
 }

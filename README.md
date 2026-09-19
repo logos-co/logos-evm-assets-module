@@ -8,10 +8,9 @@ conversion, unsigned transfer construction, and transaction-history decoration.
 It deliberately has no keystore or sender dependency. It cannot request approval, sign, or
 broadcast a transaction; callers receive one unsigned call and decide how to submit it.
 
-On a fresh profile it asks `eth_rpc_module` to apply its own defaults. Only an explicit
-`unconfigured` status licenses that write. Startup is best effort, and every public fact read
-retries until the provider explicitly reports a settled configuration, so an early IPC or
-capability-token race cannot leave the process permanently unconfigured.
+It only reads `eth_rpc_module` — the chain registry and `eth_call` — and never configures it.
+Seeding the default chains is `eth_rpc_module.init_defaults`, which the apps composing this
+module call.
 
 ## Contract
 

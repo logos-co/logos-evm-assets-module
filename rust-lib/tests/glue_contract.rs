@@ -45,6 +45,24 @@ fn code_only(source: &str) -> String {
     out
 }
 
+/// The name after each `<receiver>.`, however the call is wrapped across lines.
+fn called_on(code: &str, receiver: &str) -> Vec<String> {
+    let mut names: Vec<String> = code
+        .split(receiver)
+        .skip(1)
+        .filter_map(|tail| tail.trim_start().strip_prefix('.'))
+        .map(|call| {
+            call.trim_start()
+                .chars()
+                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                .collect()
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn method(source: &str, name: &str, next: &str) -> String {
     let implementations = source.find("impl EvmAssetsModule for").unwrap_or(0);
     let start = implementations
@@ -76,18 +94,13 @@ fn money_never_leaves_from_the_assets_module() {
 #[test]
 fn outbound_requests_are_explicitly_bounded() {
     let code = code_only(GLUE);
-    for unbounded in [
-        ".config_status(",
-        ".init_defaults(",
-        ".list_chain_configs(",
-        ".call(",
-    ] {
+    for unbounded in [".list_chain_configs(", ".call("] {
         assert!(
             !code.contains(unbounded),
             "unbounded outbound call: {unbounded}"
         );
     }
-    assert!(code.matches("_with_timeout(").count() >= 4);
+    assert!(code.matches("_with_timeout(").count() >= 2);
 }
 
 #[test]
@@ -120,18 +133,7 @@ fn refusals_are_relayed_as_json_objects() {
 
 #[test]
 fn only_the_declared_fact_providers_are_called() {
-    let code = code_only(GLUE);
-    let mut clients = Vec::new();
-    for tail in code.split("modules().").skip(1) {
-        clients.push(
-            tail.chars()
-                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-                .collect::<String>(),
-        );
-    }
-    clients.sort();
-    clients.dedup();
-    assert_eq!(clients, ["eth_rpc_module"]);
+    assert_eq!(called_on(&code_only(GLUE), "modules()"), ["eth_rpc_module"]);
 }
 
 #[test]
@@ -141,22 +143,12 @@ fn the_caller_owns_token_membership() {
     }
 }
 
+/// An information provider: it reads the chain registry and makes RPC reads, and never writes
+/// eth_rpc's configuration. The apps that compose it ask eth_rpc for its defaults.
 #[test]
-fn every_fact_read_retries_unsettled_dependency_initialization() {
-    for (name, next) in [
-        ("list_assets", "get_balances"),
-        ("get_balances", "resolve_asset"),
-        ("resolve_asset", "build_transfer"),
-        ("build_transfer", "decorate_history"),
-        ("decorate_history", "logos_module_install"),
-    ] {
-        let body = method(GLUE, name, next);
-        assert!(
-            body.contains("self.ensure_eth_rpc(&budget)"),
-            "{name} does not retry dependency initialization"
-        );
-    }
-
-    let startup = method(GLUE, "on_context_ready", "list_assets");
-    assert!(startup.contains("self.ensure_eth_rpc(&budget)"));
+fn eth_rpc_is_only_read_never_configured() {
+    assert_eq!(
+        called_on(&code_only(GLUE), "eth_rpc_module"),
+        ["call_with_timeout", "list_chain_configs_with_timeout"]
+    );
 }
