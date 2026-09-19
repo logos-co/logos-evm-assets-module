@@ -1,15 +1,13 @@
 //! Logos boundary for reusable EVM asset operations.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use alloy::primitives::{Address, U256};
 use serde_json::{json, Value};
 
 use crate::assets::{self, Asset, TokenSort};
-use crate::budget::{deadline, Budget, INIT, LOCAL, PROBE, READ, RPC, STARTUP, TRANSFER};
-use crate::depinit::{self, Next};
+use crate::budget::{deadline, Budget, LOCAL, READ, RPC, TRANSFER};
 use crate::transfer::{self, TransferRequest};
 use crate::verified::{self, Answer};
 use crate::{codec, rows, units};
@@ -43,9 +41,7 @@ include!(concat!(
 ));
 
 #[derive(Default)]
-struct EvmAssetsModuleImpl {
-    eth_rpc_settled: AtomicBool,
-}
+struct EvmAssetsModuleImpl;
 
 fn err(error: impl std::fmt::Display) -> String {
     let message = error.to_string();
@@ -74,38 +70,6 @@ fn asset_value(asset: &Asset) -> Value {
 }
 
 impl EvmAssetsModuleImpl {
-    /// Startup is best effort. Every public fact read calls this again until eth_rpc explicitly
-    /// reports configured, so an early capability-token rejection cannot strand a fresh
-    /// profile at chain 0 for the rest of the process lifetime.
-    fn ensure_eth_rpc(&self, budget: &Budget) {
-        if self.eth_rpc_settled.load(Ordering::Relaxed) {
-            return;
-        }
-        let Some(timeout) = budget.take(PROBE) else {
-            return;
-        };
-        let Ok(status) = modules().eth_rpc_module.config_status_with_timeout(timeout) else {
-            return;
-        };
-        match depinit::next_step(&status) {
-            Next::Settled => self.eth_rpc_settled.store(true, Ordering::Relaxed),
-            Next::Initialize => {
-                let Some(timeout) = budget.take(INIT) else {
-                    return;
-                };
-                let initialized = modules()
-                    .eth_rpc_module
-                    .init_defaults_with_timeout(timeout)
-                    .map(|raw| depinit::reply_ok(&raw))
-                    .unwrap_or(false);
-                if initialized {
-                    self.eth_rpc_settled.store(true, Ordering::Relaxed);
-                }
-            }
-            Next::AskAgain => {}
-        }
-    }
-
     fn chain_record(&self, chain_id: u64, budget: &Budget) -> Result<Value, String> {
         let timeout = budget
             .take(LOCAL)
@@ -174,11 +138,6 @@ impl EvmAssetsModuleImpl {
 }
 
 impl EvmAssetsModule for EvmAssetsModuleImpl {
-    fn on_context_ready(&self, _ctx: &RustModuleContext) {
-        let budget = Budget::new(STARTUP);
-        self.ensure_eth_rpc(&budget);
-    }
-
     fn list_assets(&self, chain_id: i64, tokens_json: String) -> String {
         if chain_id < 0 {
             return err("chainId must be non-negative");
@@ -188,7 +147,6 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
             Err(e) => return err(e),
         };
         let budget = Budget::new(READ);
-        self.ensure_eth_rpc(&budget);
         match self.offered(chain_id as u64, tokens, &budget) {
             Ok(assets) => json!({"ok":true,"chainId":chain_id,"tokens":assets.iter().map(asset_value).collect::<Vec<_>>()}).to_string(),
             Err(error) => err(error),
@@ -217,7 +175,6 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
             Err(e) => return err(e),
         };
         let budget = Budget::new(READ);
-        self.ensure_eth_rpc(&budget);
         let offered = match self.offered(chain_id as u64, tokens, &budget) {
             Ok(v) => v,
             Err(e) => return err(e),
@@ -261,7 +218,6 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
             Err(e) => return err(e),
         };
         let budget = Budget::new(READ);
-        self.ensure_eth_rpc(&budget);
         let offered = match self.offered(chain_id as u64, tokens, &budget) {
             Ok(v) => v,
             Err(e) => return err(e),
@@ -293,7 +249,6 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
             .map(|d| d.min(TRANSFER))
             .unwrap_or(TRANSFER);
         let budget = Budget::new(allowance);
-        self.ensure_eth_rpc(&budget);
         let offered = match self.offered(chain_id as u64, tokens, &budget) {
             Ok(v) => v,
             Err(e) => return err(e),
@@ -355,7 +310,6 @@ impl EvmAssetsModule for EvmAssetsModuleImpl {
             .filter_map(|row| row.get("chainId").and_then(Value::as_u64))
             .collect();
         let budget = Budget::new(READ);
-        self.ensure_eth_rpc(&budget);
         let mut cache = BTreeMap::new();
         let mut records = BTreeMap::new();
         let mut attempted = BTreeSet::new();

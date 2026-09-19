@@ -130,6 +130,9 @@ sections:
     step: true
     steps:
       - title: "Point Sepolia at Anvil"
+        text: |
+          `evm_assets_module` only reads the chain registry. Seeding the default chains is
+          the composing app's call to `eth_rpc_module`; here the tutorial makes it.
         run: |
           ./logos/bin/logoscore call eth_rpc_module init_defaults
           ./logos/bin/logoscore call eth_rpc_module set_chain_config 11155111 '{"endpoint":"http://127.0.0.1:8545"}'

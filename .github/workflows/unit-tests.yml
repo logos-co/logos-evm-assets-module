@@ -34,7 +34,7 @@ jobs:
           echo "$out"
           for t in money_never_leaves_from_the_assets_module \
                    outbound_requests_are_explicitly_bounded \
-                   every_fact_read_retries_unsettled_dependency_initialization \
+                   eth_rpc_is_only_read_never_configured \
                    a_transfer_builds_one_call_and_checks_at_most_one_contract \
                    the_caller_owns_token_membership \
                    every_bad_descriptor_is_refused_as_bad_token \
@@ -45,4 +45,4 @@ jobs:
             echo "$out" | grep -q "$t" || { echo "MISSING: $t"; exit 1; }
           done
           n=$(echo "$out" | grep -c ': test$')
-          echo "tests: $n"; [ "$n" -ge 44 ]
+          echo "tests: $n"; [ "$n" -ge 42 ]
