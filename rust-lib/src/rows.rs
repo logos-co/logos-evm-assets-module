@@ -6,6 +6,13 @@ use serde_json::{json, Value};
 use crate::assets::Asset;
 use crate::units;
 
+/// EIP-7708's emitter. Its Transfer logs move ether: it is never a token contract.
+const SYSTEM_ADDRESS: &str = "0xfffffffffffffffffffffffffffffffffffffffe";
+
+fn is_system(address: &str) -> bool {
+    address.eq_ignore_ascii_case(SYSTEM_ADDRESS)
+}
+
 fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value
         .get(key)
@@ -14,6 +21,10 @@ fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 fn at<'a>(offered: &'a [Asset], address: &str) -> Option<&'a Asset> {
+    // Whatever a token list claims, the system address names no token.
+    if is_system(address) {
+        return None;
+    }
     offered.iter().find(|asset| {
         asset
             .address
@@ -65,7 +76,9 @@ pub fn decorate_row(row: &mut Value, offered: &[Asset]) {
         }
     }
     if let Some(transfers) = row.get_mut("transfers").and_then(Value::as_array_mut) {
-        for transfer in transfers {
+        // A sender that predates EIP-7708 files the system address's ether logs here.
+        transfers.retain(|t| !is_system(text(t, "contract").unwrap_or("")));
+        for transfer in transfers.iter_mut() {
             let contract = text(transfer, "contract").unwrap_or("").to_string();
             let asset = at(offered, &contract);
             transfer["known"] = json!(asset.is_some());
@@ -75,6 +88,22 @@ pub fn decorate_row(row: &mut Value, offered: &[Asset]) {
                 if let Some(amount) = text(transfer, "amount").map(str::to_string) {
                     units::decorate(transfer, "amount", &amount, asset.decimals);
                 }
+            }
+        }
+    }
+    if row.get("transfers").and_then(Value::as_array).is_some_and(Vec::is_empty) {
+        row.as_object_mut().map(|object| object.remove("transfers"));
+    }
+    // Ether transfers are priced in the chain's own asset, and only where it has a symbol.
+    let native = offered.iter().find(|asset| asset.native && !asset.symbol_unknown);
+    if let (Some(native), Some(entries)) =
+        (native, row.get_mut("nativeTransfers").and_then(Value::as_array_mut))
+    {
+        for entry in entries {
+            entry["symbol"] = json!(native.symbol);
+            entry["decimals"] = json!(native.decimals);
+            if let Some(amount) = text(entry, "amount").map(str::to_string) {
+                units::decorate(entry, "amount", &amount, native.decimals);
             }
         }
     }
@@ -166,6 +195,61 @@ mod tests {
         decorate_row(&mut row, &[weth()]);
         assert_eq!(row["transfers"][0]["symbol"], "WETH");
         assert_eq!(row["transfers"][0]["known"], true);
+    }
+
+    fn ether() -> Asset {
+        Asset {
+            chain_id: 1,
+            symbol: "ETH".into(),
+            name: "Ether".into(),
+            decimals: 18,
+            address: None,
+            native: true,
+            builtin: true,
+            enabled: true,
+            source: "native".into(),
+            logo_uri: None,
+            symbol_unknown: false,
+        }
+    }
+
+    /// EIP-7708: the system address logs ether with the ERC-20 Transfer topic. However a sender
+    /// or a token list presents it, it is never decorated, looked up or named as a token.
+    #[test]
+    fn a_system_emitted_transfer_is_never_a_token() {
+        let system = "0xfffffffffffffffffffffffffffffffffffffffe";
+        let fake = Asset {
+            symbol: "FAKE".into(),
+            address: Some(system.to_uppercase().replace("0X", "0x")),
+            ..weth()
+        };
+        let mut row = json!({"txTo": system, "to": system, "transfers": [
+            {"contract": system, "amount": "5"},
+            {"contract": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", "amount": "1"}]});
+        decorate_row(&mut row, &[weth(), fake.clone()]);
+        let transfers = row["transfers"].as_array().unwrap();
+        assert_eq!(transfers.len(), 1, "{row}");
+        assert_eq!(transfers[0]["symbol"], "WETH");
+        assert!(row.get("interactedWithSymbol").is_none(), "no token lives at the system address");
+
+        let mut only = json!({"transfers": [{"contract": system, "amount": "5"}]});
+        decorate_row(&mut only, &[fake]);
+        assert!(only.get("transfers").is_none(), "no token moved, so no token list: {only}");
+    }
+
+    #[test]
+    fn ether_transfers_are_priced_in_the_chains_native_asset() {
+        let mut row = json!({"nativeTransfers": [{"amount": "500000000000000000"}]});
+        decorate_row(&mut row, &[ether(), weth()]);
+        let entry = &row["nativeTransfers"][0];
+        assert_eq!((entry["symbol"].clone(), entry["decimals"].clone()), (json!("ETH"), json!(18)));
+        assert_eq!(entry["amountDisplay"], "0.5");
+        assert!(entry.get("known").is_none(), "ether is not looked up in a token table");
+
+        let nameless = Asset { symbol: String::new(), symbol_unknown: true, ..ether() };
+        let mut row = json!({"nativeTransfers": [{"amount": "5"}]});
+        decorate_row(&mut row, &[nameless]);
+        assert_eq!(row["nativeTransfers"][0], json!({"amount": "5"}), "no unit, so no figure");
     }
 
     #[test]

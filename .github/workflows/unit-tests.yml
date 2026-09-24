@@ -41,8 +41,9 @@ jobs:
                    an_ambiguous_symbol_among_the_candidates_is_refused \
                    structured_refusals_survive \
                    each_history_row_uses_its_own_chain \
-                   refuses_ambiguous_or_lossy_amounts; do
+                   refuses_ambiguous_or_lossy_amounts \
+                   a_system_emitted_transfer_is_never_a_token; do
             echo "$out" | grep -q "$t" || { echo "MISSING: $t"; exit 1; }
           done
           n=$(echo "$out" | grep -c ': test$')
-          echo "tests: $n"; [ "$n" -ge 42 ]
+          echo "tests: $n"; [ "$n" -ge 44 ]
