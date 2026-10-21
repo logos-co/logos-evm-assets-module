@@ -21,9 +21,9 @@ sections:
   - title: "Build the runtime and modules"
     step: true
     steps:
-      - title: "Build logoscore, Foundry and solc"
+      - title: "Build logosctl, Foundry and solc"
         run: |
-          nix build 'github:logos-co/logos-logoscore-cli#cli' --out-link ./logos
+          nix build 'github:logos-co/logos-logoscore-cli#ctl' --out-link ./logos
           nix build 'nixpkgs#foundry' --out-link ./foundry
           nix build 'nixpkgs#solc' --out-link ./solc
       - title: "Build the two modules"
@@ -35,7 +35,6 @@ sections:
       - title: "Lay out the session"
         run: |
           mkdir -p session/modules
-          cp -RL ./logos/modules/. ./session/modules/
           cp -RL ./rpc/modules/. ./session/modules/
           cp -RL ./assets/modules/. ./session/modules/
           chmod -R u+w session/modules
@@ -108,21 +107,18 @@ sections:
           echo "Token installed"
         expect_contains:
           - "Token installed"
-      - title: "Start logoscore"
-        run: "sh -c './logos/bin/logoscore -D -m ./session/modules > logoscore.log 2>&1 &'"
-      - title: "Wait for the daemon"
-        run: |
-          for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            if ./logos/bin/logoscore status >/dev/null 2>&1; then
-              exit 0
-            fi
-            sleep 1
-          done
-          exit 1
+      - title: "Start the daemon"
+        text: "`--detach` returns once the daemon accepts commands."
+        # The bundled package downloader starts a storage node in $HOME; keep it
+        # out of the real one.
+        run: "mkdir -p home && HOME=\"$PWD/home\" ./logos/bin/logosctl --config-dir ./session daemon start --detach"
+        code_block: "logosctl --config-dir ./session daemon start --detach"
+        expect_contains:
+          - "Daemon started"
       - title: "Load the provider and composer"
         run: |
-          ./logos/bin/logoscore load-module eth_rpc_module
-          ./logos/bin/logoscore load-module evm_assets_module
+          ./logos/bin/logosctl --config-dir ./session module load eth_rpc_module
+          ./logos/bin/logosctl --config-dir ./session module load evm_assets_module
         expect_contains:
           - "evm_assets_module"
 
@@ -134,9 +130,9 @@ sections:
           `evm_assets_module` only reads the chain registry. Seeding the default chains is
           the composing app's call to `eth_rpc_module`; here the tutorial makes it.
         run: |
-          ./logos/bin/logoscore call eth_rpc_module init_defaults
-          ./logos/bin/logoscore call eth_rpc_module set_chain_config 11155111 '{"endpoint":"http://127.0.0.1:8545"}'
-          ./logos/bin/logoscore call eth_rpc_module verify_chain_id 11155111
+          ./logos/bin/logosctl --config-dir ./session call eth_rpc_module init_defaults
+          ./logos/bin/logosctl --config-dir ./session call eth_rpc_module set_chain_config 11155111 '{"endpoint":"http://127.0.0.1:8545"}'
+          ./logos/bin/logosctl --config-dir ./session call eth_rpc_module verify_chain_id 11155111
         expect_contains:
           - "chainId"
           - "11155111"
@@ -150,7 +146,7 @@ sections:
           content: |
             [{ "address": "0x1000000000000000000000000000000000000001", "symbol": "TKN", "decimals": 6, "name": "Test Token" }]
       - title: "The registry native asset comes first, then the named tokens"
-        run: "./logos/bin/logoscore call evm_assets_module list_assets 11155111 @tokens.json"
+        run: "./logos/bin/logosctl --config-dir ./session call evm_assets_module list_assets 11155111 @tokens.json"
         expect_contains:
           - "symbol"
           - "ETH"
@@ -162,12 +158,12 @@ sections:
           content: |
             [{ "address": "0x0000000000000000000000000000000000000000", "symbol": "ZERO", "decimals": 18 }]
       - title: "It is refused, by index"
-        run: "./logos/bin/logoscore call evm_assets_module list_assets 11155111 @bad.json"
+        run: "./logos/bin/logosctl --config-dir ./session call evm_assets_module list_assets 11155111 @bad.json"
         expect_contains:
           - "bad_token"
           - "tokens[0]"
       - title: "Read Anvil account zero"
-        run: "./logos/bin/logoscore call evm_assets_module get_balances 11155111 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 @tokens.json alpha"
+        run: "./logos/bin/logosctl --config-dir ./session call evm_assets_module get_balances 11155111 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 @tokens.json alpha"
         expect_contains:
           - "display"
           - "exact"
@@ -186,7 +182,7 @@ sections:
               "tokens": [{ "address": "0x1000000000000000000000000000000000000001", "symbol": "TKN", "decimals": 6 }]
             }
       - title: "Build one unsigned call"
-        run: "./logos/bin/logoscore call evm_assets_module build_transfer 11155111 @transfer.json"
+        run: "./logos/bin/logosctl --config-dir ./session call evm_assets_module build_transfer 11155111 @transfer.json"
         expect_contains:
           - "1500000"
           - "amountExact"
@@ -198,7 +194,5 @@ sections:
     step: true
     steps:
       - run: |
-          trap '' TERM
-          ./logos/bin/logoscore stop || true
+          ./logos/bin/logosctl --config-dir ./session daemon stop || true
           kill "$(cat anvil.pid)" 2>/dev/null || true
-          true
