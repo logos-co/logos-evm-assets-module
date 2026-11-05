@@ -1,7 +1,7 @@
 {
   "name": "evm_assets_module",
   "display_name": "EVM Assets",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "core",
   "interface": "cdylib",
   "concurrency": "multi",
@@ -10,7 +10,7 @@
   "author": "Logos Core Team",
   "main": "evm_assets_module_plugin",
   "dependencies": [
-    { "name": "eth_rpc_module", "version": "~0.1.0" }
+    { "name": "eth_rpc_module", "version": "~0.2.0" }
   ],
   "include": [],
   "capabilities": [],
